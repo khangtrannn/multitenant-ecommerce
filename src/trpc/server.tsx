@@ -25,3 +25,5 @@ createTRPCOptionsProxy<AppRouter>({
   }),
   queryClient: getQueryClient,
 });
+
+export const caller = appRouter.createCaller(createTRPCContext);
