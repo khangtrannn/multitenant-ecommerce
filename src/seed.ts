@@ -1,5 +1,6 @@
 import { getPayload } from "payload";
 import config from "@payload-config";
+import type { Category, Tenant, User } from "./payload-types";
 
 const categories = [
   {
@@ -137,75 +138,256 @@ const categories = [
   },
 ]
 
-const upsertCategory = async ({
-  payload,
-  name,
-  slug,
-  color,
-  parent,
-}: {
-  payload: Awaited<ReturnType<typeof getPayload>>;
-  name: string;
-  slug: string;
-  color?: string;
-  parent: null | number | string;
-}) => {
-  const existingCategory = await payload.find({
-    collection: "categories",
-    limit: 1,
-    pagination: false,
+const RETRY_DELAY_MS = 250;
+const RETRY_LIMIT = 5;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRetryableLockTimeout = (error: unknown) => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const maybeError = error as {
+    code?: number;
+    errorLabelSet?: Set<string>;
+    message?: string;
+  };
+
+  return (
+    maybeError.code === 24 ||
+    maybeError.errorLabelSet?.has("TransientTransactionError") === true ||
+    maybeError.message?.includes("LockTimeout") === true
+  );
+};
+
+const withRetry = async <T>(label: string, operation: () => Promise<T>): Promise<T> => {
+  for (let attempt = 1; attempt <= RETRY_LIMIT; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isRetryableLockTimeout(error) || attempt === RETRY_LIMIT) {
+        throw error;
+      }
+
+      console.warn(
+        `Retrying ${label} after transient MongoDB lock timeout (${attempt}/${RETRY_LIMIT})...`,
+      );
+
+      await sleep(RETRY_DELAY_MS * attempt);
+    }
+  }
+
+  throw new Error(`Unable to complete ${label}`);
+};
+
+const ensureIndexes = async (payload: Awaited<ReturnType<typeof getPayload>>) => {
+  const collectionsToPrepare = ["tenants", "users", "categories"] as const;
+
+  await Promise.all(
+    collectionsToPrepare.map(async (collection) => {
+      const model = (payload.db.collections as Record<string, { ensureIndexes?: () => Promise<void> }>)[
+        collection
+      ];
+
+      if (typeof model?.ensureIndexes === "function") {
+        await model.ensureIndexes();
+      }
+    }),
+  );
+};
+
+const findBySlug = async (
+  payload: Awaited<ReturnType<typeof getPayload>>,
+  collection: "tenants" | "categories",
+  slug: string,
+) => {
+  const result = await payload.find({
+    collection,
     where: {
       slug: {
         equals: slug,
       },
     },
+    limit: 1,
+    pagination: false,
+    overrideAccess: true,
   });
 
+  return result.docs[0] ?? null;
+};
+
+const upsertTenant = async (
+  payload: Awaited<ReturnType<typeof getPayload>>,
+  tenantData: Pick<Tenant, "name" | "slug" | "stripeAccountId">,
+  label: string,
+): Promise<Tenant> => {
+  const existingTenant = await findBySlug(payload, "tenants", tenantData.slug);
+
+  if (existingTenant) {
+    return withRetry(`${label} tenant update`, () =>
+      payload.update({
+        collection: "tenants",
+        id: existingTenant.id,
+        data: tenantData,
+        disableTransaction: true,
+      }) as Promise<Tenant>,
+    );
+  }
+
+  return withRetry(`${label} tenant creation`, () =>
+    payload.create({
+      collection: "tenants",
+      data: tenantData,
+      disableTransaction: true,
+    }) as Promise<Tenant>,
+  );
+};
+
+const upsertAdminUser = async (
+  payload: Awaited<ReturnType<typeof getPayload>>,
+  adminTenantId: string,
+) => {
+  return upsertUser(payload, {
+    email: "admin@demo.com",
+    password: "demo",
+    roles: ["super-admin"],
+    username: "admin",
+    tenants: [
+      {
+        tenant: adminTenantId,
+      },
+    ],
+  }, "admin");
+};
+
+const upsertUser = async (
+  payload: Awaited<ReturnType<typeof getPayload>>,
+  userData: Pick<User, "email" | "password" | "roles" | "username" | "tenants">,
+  label: string,
+) => {
+  const existingUser = await payload.find({
+    collection: "users",
+    where: {
+      email: {
+        equals: userData.email,
+      },
+    },
+    limit: 1,
+    pagination: false,
+    overrideAccess: true,
+    showHiddenFields: true,
+  });
+
+  const existingSeedUser = existingUser.docs[0];
+
+  if (existingSeedUser) {
+    return withRetry(`${label} user update`, () =>
+      payload.update({
+        collection: "users",
+        id: existingSeedUser.id,
+        data: userData,
+        overrideAccess: true,
+        showHiddenFields: true,
+        disableTransaction: true,
+      }),
+    );
+  }
+
+  return withRetry(`${label} user creation`, () =>
+    payload.create({
+      collection: "users",
+      data: userData,
+      overrideAccess: true,
+      showHiddenFields: true,
+      disableTransaction: true,
+    }),
+  );
+};
+
+const upsertCategory = async (
+  payload: Awaited<ReturnType<typeof getPayload>>,
+  category: {
+    name: string;
+    slug: string;
+    color?: string;
+  },
+  parent: string | null,
+): Promise<Category> => {
+  const existingCategory = await findBySlug(payload, "categories", category.slug);
   const data = {
-    name,
-    slug,
-    color,
+    name: category.name,
+    slug: category.slug,
+    color: category.color,
     parent,
   };
 
-  if (existingCategory.docs[0]) {
-    return payload.update({
-      collection: "categories",
-      id: existingCategory.docs[0].id,
-      data,
-    });
+  if (existingCategory) {
+    return withRetry(`category update for ${category.slug}`, () =>
+      payload.update({
+        collection: "categories",
+        id: existingCategory.id,
+        data,
+        disableTransaction: true,
+      }) as Promise<Category>,
+    );
   }
 
-  return payload.create({
-    collection: "categories",
-    data,
-  });
+  return withRetry(`category creation for ${category.slug}`, () =>
+    payload.create({
+      collection: "categories",
+      data,
+      disableTransaction: true,
+    }) as Promise<Category>,
+  );
 };
 
 const seed = async () => {
   const payload = await getPayload({ config });
+  await ensureIndexes(payload);
 
-  try {
-    for (const category of categories) {
-      const parentCategory = await upsertCategory({
-        payload,
-        name: category.name,
-        slug: category.slug,
-        color: category.color,
-        parent: null,
-      });
+  const adminTenant = await upsertTenant(
+    payload,
+    {
+      name: "admin",
+      slug: "admin",
+      stripeAccountId: "admin",
+    },
+    "admin",
+  );
+  const demoTenant = await upsertTenant(
+    payload,
+    {
+      name: "demo",
+      slug: "demo",
+      stripeAccountId: "demo",
+    },
+    "demo",
+  );
 
-      for (const subCategory of category.subcategories || []) {
-        await upsertCategory({
-          payload,
-          name: subCategory.name,
-          slug: subCategory.slug,
-          parent: parentCategory.id,
-        });
-      }
+  await upsertAdminUser(payload, adminTenant.id);
+  await upsertUser(
+    payload,
+    {
+      email: "demo@gmail.com",
+      password: "demo",
+      roles: ["user"],
+      username: "demo",
+      tenants: [
+        {
+          tenant: demoTenant.id,
+        },
+      ],
+    },
+    "demo",
+  );
+
+  for (const category of categories) {
+    const parentCategory = await upsertCategory(payload, category, null);
+
+    for (const subCategory of category.subcategories || []) {
+      await upsertCategory(payload, subCategory, parentCategory.id);
     }
-  } finally {
-    await payload.db.destroy?.();
   }
 }
 
