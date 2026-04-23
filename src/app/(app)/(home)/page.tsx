@@ -21,7 +21,7 @@ const Page = async ({ searchParams }: Props) => {
   }, {
     initialCursor: 1,
     getNextPageParam: (lastPage) => {
-      return lastPage.docs.length > 0 ? lastPage.nextPage : undefined;
+      return lastPage?.docs?.length ? lastPage.nextPage : undefined;
     },
   },));
 
