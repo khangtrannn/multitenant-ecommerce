@@ -1,6 +1,7 @@
 import { getPayload } from "payload";
 import config from "@payload-config";
 import type { Category, Tenant, User } from "./payload-types";
+import { stripe } from "./lib/stripe";
 
 const categories = [
   {
@@ -261,6 +262,16 @@ const upsertAdminUser = async (
   }, "admin");
 };
 
+const createStripeAccount = async (label: string) => {
+  const account = await stripe.accounts.create({});
+
+  if (!account?.id) {
+    throw new Error(`Failed to create Stripe account for ${label}`);
+  }
+
+  return account.id;
+};
+
 const upsertUser = async (
   payload: Awaited<ReturnType<typeof getPayload>>,
   userData: Pick<User, "email" | "password" | "roles" | "username" | "tenants">,
@@ -346,21 +357,24 @@ const seed = async () => {
   const payload = await getPayload({ config });
   await ensureIndexes(payload);
 
+  const adminStripeAccountId = await createStripeAccount("admin");
   const adminTenant = await upsertTenant(
     payload,
     {
       name: "admin",
       slug: "admin",
-      stripeAccountId: "admin",
+      stripeAccountId: adminStripeAccountId,
     },
     "admin",
   );
+
+  const demoStripeAccountId = await createStripeAccount("demo");
   const demoTenant = await upsertTenant(
     payload,
     {
       name: "demo",
       slug: "demo",
-      stripeAccountId: "demo",
+      stripeAccountId: demoStripeAccountId,
     },
     "demo",
   );
