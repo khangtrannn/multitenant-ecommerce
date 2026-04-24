@@ -19,6 +19,7 @@ const Page = async ({ params, searchParams }: Props) => {
   const queryClient = getQueryClient();
   void queryClient.prefetchInfiniteQuery(trpc.products.getMany.infiniteQueryOptions({
     ...filters,
+    cursor: 1,
     tenantSlug: slug,
     limit: DEFAULT_LIMIT,
   }, {
@@ -36,4 +37,3 @@ const Page = async ({ params, searchParams }: Props) => {
 }
 
 export default Page;
-

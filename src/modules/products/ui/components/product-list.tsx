@@ -29,11 +29,13 @@ export const ProductList = ({ category, tenantSlug, narrowView }: Props) => {
   } = useSuspenseInfiniteQuery(trpc.products.getMany.infiniteQueryOptions(
     {
       ...filters,
+      cursor: 1,
       category,
       tenantSlug,
       limit: DEFAULT_LIMIT,
     },
     {
+      initialCursor: 1,
       getNextPageParam: (lastPage) => {
         return lastPage?.docs?.length ? lastPage.nextPage : undefined;
       },

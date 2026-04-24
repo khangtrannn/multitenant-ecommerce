@@ -23,6 +23,7 @@ const Page = async ({ params, searchParams }: Props) => {
     trpc.products.getMany.infiniteQueryOptions(
       {
         ...filters,
+        cursor: 1,
         category,
         limit: DEFAULT_LIMIT,
       },
