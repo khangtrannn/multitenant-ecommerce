@@ -7,6 +7,7 @@ import { Category, Media, Tenant } from "@/payload-types";
 import { baseProcedure, createTRPCRouter } from "@/trpc/init";
 
 import { sortValues } from "../search-params";
+import { TRPCError } from "@trpc/server";
 
 export const productsRouter = createTRPCRouter({
   getOne: baseProcedure
@@ -27,6 +28,13 @@ export const productsRouter = createTRPCRouter({
           content: false,
         },
       });
+
+      if (product.isArchived) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Product not found",
+        })
+      }
 
       let isPurchased = false;
 
@@ -65,7 +73,7 @@ export const productsRouter = createTRPCRouter({
       });
 
       const reviewRating =
-        reviews.docs.length > 0
+        reviews.docs?.length > 0
         ? reviews.docs.reduce((acc, review) => acc + review.rating, 0) / reviews.totalDocs
         : 0;
 
@@ -119,7 +127,11 @@ export const productsRouter = createTRPCRouter({
       }),
     )
     .query(async ({ ctx, input }) => {
-      const where: Where = {};
+      const where: Where = {
+        isArchived: {
+          not_equals: true,
+        },
+      };
       let sort: Sort = "-createdAt";
 
       if (input.sort === "curated") {
@@ -153,6 +165,14 @@ export const productsRouter = createTRPCRouter({
         where["tenant.slug"] = {
           equals: input.tenantSlug,
         };
+      } else {
+        // If we are loading products for public storefront (no tenantSlug)
+        // Make sure to not load products set to "isPrivate: true" (using reverse not_equals logic)
+        // These products are exclusively private to the tenant store
+
+        where["isPrivate"] = {
+          not_equals: true,
+        }
       }
 
       if (input.category) {
@@ -225,7 +245,7 @@ export const productsRouter = createTRPCRouter({
             ...doc,
             reviewCount: reviewsData.totalDocs,
             reviewRating:
-              reviewsData.docs.length === 0
+              reviewsData.docs?.length === 0
                 ? 0
                 : reviewsData.docs.reduce((acc, review) => acc + review.rating, 0) / reviewsData.totalDocs
           }
